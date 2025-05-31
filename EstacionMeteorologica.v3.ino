@@ -16,8 +16,7 @@
 #define OLED_RST        -1
 #define REFRESH_MS      2000   // Intervalo de actualización de pantalla (ms)
 #define DEBOUNCE_MS     80     // Tiempo de debounce en ms
-#define BUZZER_PIN 7
-
+#define BUZZER_PIN      7
 
 // Pines de los switches (entradas)
 const uint8_t switch_pin[NUM_SWITCH] = {3, 4, 5, 6};
@@ -27,7 +26,7 @@ uint32_t lastDebounceTime[NUM_SWITCH] = {0};
 bool     lastReading[NUM_SWITCH]     = {HIGH, HIGH, HIGH, HIGH};
 bool     buttonState[NUM_SWITCH]     = {HIGH, HIGH, HIGH, HIGH};
 
-// En este variable guardamos qué “modo” está seleccionado:
+// En esta variable guardamos qué “modo” está seleccionado:
 // 1 = Temperatura (DHT22), 
 // 2 = Humedad (DHT22),
 // 3 = PPM + Calidad de aire (MQ-135), 
@@ -43,14 +42,15 @@ Adafruit_SSD1306 display(ANCHO_PANTALLA, ALTO_PANTALLA, &Wire, OLED_RST);
 
 // Sensor BMP180 (Adafruit_BMP085_Unified)
 Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10085);
+bool bmp_ok = false;  // Bandera que indica si el BMP180 inicializó correctamente
 
 // Texto para calidad de aire (se almacena en FLASH para no consumir SRAM)
 const __FlashStringHelper* calidad_aire = nullptr;
 
 void setup() {
-
   pinMode(BUZZER_PIN, OUTPUT);
   noTone(BUZZER_PIN);  // Asegura que no esté sonando al inicio
+
   // --- 1) Configuro switches como INPUT_PULLUP y seteo los estados iniciales ---
   for (uint8_t i = 0; i < NUM_SWITCH; i++) {
     pinMode(switch_pin[i], INPUT_PULLUP);
@@ -61,16 +61,13 @@ void setup() {
   // --- 2) Inicializo sensor DHT22 ---
   dht.begin();
 
-  // --- 3) Inicializo sensor BMP180 ---
-  if (!bmp.begin()) {
-    // Si falla la inicialización del BMP180, parpadeamos el LED integrado y quedamos aquí
-    while (1) {
-      pinMode(LED_BUILTIN, OUTPUT);
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(100);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(100);
-    }
+  // --- 3) Inicializo sensor BMP180 sin bloquear si falla ---
+  if (bmp.begin()) {
+    bmp_ok = true;
+  } else {
+    bmp_ok = false;
+    // Si quieres, puedes mostrar un mensaje breve en la OLED indicando el error.
+    // Pero recuerda que la OLED aún no está inicializada. Marcamos bmp_ok=false.
   }
 
   // --- 4) Inicializo pantalla OLED ---
@@ -83,7 +80,6 @@ void loop() {
   uint32_t now = millis();
 
   // --- 1) Lectura de switches con debounce ---
-  // Recorro cada switch para detectar flanco de bajada (presión: LOW)
   for (uint8_t i = 0; i < NUM_SWITCH; i++) {
     bool reading = digitalRead(switch_pin[i]);
     if (reading != lastReading[i]) {
@@ -112,22 +108,23 @@ void loop() {
     uint16_t valor_MQ = analogRead(MQ135_PIN);
 
     // --- 2.2) Lectura DHT22 (temperatura + humedad) ---
-    uint32_t t_dht = dht.readTemperature();
-    uint32_t h_dht = dht.readHumidity();
+    float t_dht = dht.readTemperature();
+    float h_dht = dht.readHumidity();
 
-    // --- 2.3) Lectura BMP180 (temperatura interna + presión) ---
-    sensors_event_t event;
-    bmp.getEvent(&event);
+    // --- 2.3) Lectura BMP180 (temperatura interna + presión) solo si inicializó ---
     float t_bmp = NAN;
-    uint32_t p_bmp = NAN;
-    if (event.pressure) {
-      // event.pressure viene en hPa, lo convierto a Pa multiplicando por 100
-      p_bmp = event.pressure * 100.0;
+    float p_bmp = NAN;
+    if (bmp_ok) {
+      sensors_event_t event;
+      bmp.getEvent(&event);
+      if (event.pressure) {
+        // event.pressure viene en hPa, lo convierto a Pa multiplicando por 100
+        p_bmp = event.pressure * 100.0;
+      }
+      bmp.getTemperature(&t_bmp);
     }
-    // Obtengo temperatura interna del BMP180 (en °C)
-    bmp.getTemperature(&t_bmp);
 
-    // --- 2.4) Determino calidad de aire según valor_MQ ---
+    // --- 2.4) Determino calidad de aire según valor_MQ y manejo del buzzer ---
     if (valor_MQ <= 300) {
       calidad_aire = F("Buena");
       noTone(BUZZER_PIN); // No suena
@@ -147,7 +144,7 @@ void loop() {
     switch (displayMode) {
       case 1:
         // Mostrar Temperatura del DHT22
-        display.setCursor(0, 24); // Centrado vertical en la pantalla (64 px alto / 2 - 16 de texto / 2 ≈ 24)
+        display.setCursor(0, 24);
         if (!isnan(t_dht)) {
           display.print(F("Temp:"));
           display.print(t_dht, 1);
@@ -172,26 +169,23 @@ void loop() {
 
       case 3:
         // Mostrar PPM y Calidad de aire (dos líneas)
-        // Línea 1: PPM
         display.setCursor(0, 0);
         display.print(F("PPM: "));
         display.print(valor_MQ);
-        // Línea 2: Calidad de aire
         display.setCursor(0, 32);
         display.print(F("Aire: "));
         display.print(calidad_aire);
         break;
 
       case 4:
-        // Mostrar Presión atmosférica (BMP180)
+        // Mostrar Presión atmosférica (BMP180) o error si bmp_ok == false
         display.setCursor(0, 24);
-        if (!isnan(p_bmp)) {
-          // Convertir Pa a hPa (dividir por 100)
+        if (bmp_ok && !isnan(p_bmp)) {
           display.print(F("Pres: "));
           display.print(p_bmp / 100.0, 1);
           display.print(F("hPa"));
         } else {
-          display.print(F("Pres Err"));
+          display.print(F("BMP Err"));
         }
         break;
 
